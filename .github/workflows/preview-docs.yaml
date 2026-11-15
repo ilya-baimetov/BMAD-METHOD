@@ -1,0 +1,87 @@
+name: Preview Docs Branch
+
+# Fork-only: keeps https://<owner>.github.io/<repo>/ in step with the docs
+# branch under review. A push to a branch only runs workflow files inside that
+# branch, so this lives on the fork's default branch and checks on a schedule
+# instead; the branch itself, and the pull request from it, stay untouched.
+
+on:
+  schedule:
+    - cron: '7,22,37,52 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  BRANCH: docs/organize-by-stage
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.compare.outputs.sha }}
+      changed: ${{ steps.compare.outputs.changed }}
+    steps:
+      - name: Compare the branch with what the preview was built from
+        id: compare
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          head=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${BRANCH}" --jq .sha)
+          owner=${GITHUB_REPOSITORY%%/*}; repo=${GITHUB_REPOSITORY#*/}
+          built=$(curl -fsSL "https://${owner}.github.io/${repo}/preview-sha.txt" 2>/dev/null || true)
+          echo "branch ${BRANCH} is at ${head}; preview built from ${built:-nothing yet}"
+          echo "sha=${head}" >> "$GITHUB_OUTPUT"
+          if [ "$head" != "$built" ] || [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: check
+    if: needs.check.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: docs-site
+    steps:
+      - name: Check out the docs branch
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.check.outputs.sha }}
+          fetch-depth: 0
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version-file: docs-site/.nvmrc
+          cache: npm
+          cache-dependency-path: docs-site/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Build documentation
+        run: npm run build
+      - name: Record which commit this preview shows
+        run: echo "${{ needs.check.outputs.sha }}" > dist/preview-sha.txt
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: docs-site/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5
